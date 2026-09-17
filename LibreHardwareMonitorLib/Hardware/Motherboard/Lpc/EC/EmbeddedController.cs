@@ -27,6 +27,22 @@ public abstract class EmbeddedController : Hardware
         new (Model.ROG_CROSSHAIR_X870E_DARK_HERO,
             BoardFamily.Amd800,
             ECSensor.TempTSensor),
+        new (Model.ROG_CROSSHAIR_X870E_HERO_BTF,
+            BoardFamily.Amd800,
+            ECSensor.TempCPU,
+            ECSensor.TempCPUPackage,
+            ECSensor.TempMB,
+            ECSensor.TempVrm,
+            ECSensor.TempTSensor,
+            ECSensor.FanCPUOpt),
+        new (Model.ROG_CROSSHAIR_X870E_HERO,
+            BoardFamily.Amd800,
+            ECSensor.TempCPU,
+            ECSensor.TempCPUPackage,
+            ECSensor.TempMB,
+            ECSensor.TempVrm,
+            ECSensor.TempTSensor,
+            ECSensor.FanCPUOpt),
         new (Model.TUF_GAMING_X870_PLUS_WIFI,
             BoardFamily.Amd800,
             ECSensor.TempVrm,
@@ -518,7 +534,12 @@ public abstract class EmbeddedController : Hardware
                 { ECSensor.TempTSensor2, new EmbeddedControllerSource("T Sensor 2", SensorType.Temperature, 0x105, blank: -40) },
                 { ECSensor.TempWaterIn, new EmbeddedControllerSource("Water In", SensorType.Temperature, 0x0100, blank: -40) },
                 { ECSensor.TempWaterOut, new EmbeddedControllerSource("Water Out", SensorType.Temperature, 0x0101, blank: -40) },
-                { ECSensor.FanWaterFlow, new EmbeddedControllerSource("Water Flow", SensorType.Flow, 0x00be, 2, factor: 1.0f / 42f * 60f) } // todo: need validation for this calculation
+                // Water flow: 0x00BC validated on a ROG MAXIMUS Z790 DARK HERO
+                // (i9-14900KF, Alphacool ES on W_FLOW): L/min = raw / 42,
+                // cross-checked against an OCCT pump-RPM calibration within
+                // ~2% across the pump range. Matches mainline Linux
+                // asus-ec-sensors (family_intel_700_series Water_Flow 0x00BC).
+                { ECSensor.FanWaterFlow, new EmbeddedControllerSource("Water Flow", SensorType.Flow, 0x00bc, 2, factor: 1.0f / 42f) }
             }
         }
     };
