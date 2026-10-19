@@ -123,10 +123,9 @@ internal sealed class Amd17Cpu : AmdCpu
         private Sensor _ccdsAverageTemperature;
         private Sensor _ccdsMaxTemperature;
         private Sensor _coreVids;
+        private float[] _pmTable = [];
         private DateTime _lastSampleTime = new(0);
         private uint _lastPwrValue;
-        private float[] _pmTable;
-        private PerCoreBaseIndices _perCoreBaseIndices;
 
         public Processor(Hardware hardware)
         {
@@ -136,7 +135,7 @@ internal sealed class Amd17Cpu : AmdCpu
             _coreTemperatureTctl = new Sensor("Core (Tctl)", _cpu._sensorTypeIndex[SensorType.Temperature]++, SensorType.Temperature, _cpu, _cpu._settings);
             _coreTemperatureTdie = new Sensor("Core (Tdie)", _cpu._sensorTypeIndex[SensorType.Temperature]++, SensorType.Temperature, _cpu, _cpu._settings);
             _coreTemperatureTctlTdie = new Sensor("Core (Tctl/Tdie)", _cpu._sensorTypeIndex[SensorType.Temperature]++, SensorType.Temperature, _cpu, _cpu._settings);
-            _ccdTemperatures = new Sensor[8]; // Hardcoded until there's a way to get max CCDs.
+            _ccdTemperatures = new Sensor[16]; // Turin / Shimada Peak expose up to 16 CCDs (k10temp).
             _coreVoltage = new Sensor("Core (SVI2 TFN)", _cpu._sensorTypeIndex[SensorType.Voltage]++, SensorType.Voltage, _cpu, _cpu._settings);
             _socVoltage = new Sensor("SoC (SVI2 TFN)", _cpu._sensorTypeIndex[SensorType.Voltage]++, SensorType.Voltage, _cpu, _cpu._settings);
             _busClock = new Sensor("Bus Speed", _cpu._sensorTypeIndex[SensorType.Clock]++, SensorType.Clock, _cpu, _cpu._settings);
@@ -148,7 +147,6 @@ internal sealed class Amd17Cpu : AmdCpu
             _cpu.ActivateSensor(_avgClockEffective);
 
             _coreVids = new Sensor("Core VIDs", _cpu._sensorTypeIndex[SensorType.Voltage]++, SensorType.Voltage, _cpu, _cpu._settings);
-            _perCoreBaseIndices = GetPerCoreBaseIndices(_cpu._smu.PmTableVersion);
 
             foreach (KeyValuePair<uint, RyzenSMU.SmuSensorType> sensor in _cpu._smu.GetPmTableStructure())
             {
@@ -159,18 +157,6 @@ internal sealed class Amd17Cpu : AmdCpu
         public List<NumaNode> Nodes { get; } = new();
 
         public float[] PmTable => _pmTable;
-
-        public PerCoreBaseIndices BaseIndices => _perCoreBaseIndices;
-
-        public double BusClockValue
-        {
-            get
-            {
-                if (_busClock?.Value.HasValue == true && _busClock.Value > 0)
-                    return (double)_busClock.Value;
-                return 100.0;
-            }
-        }
 
         public void UpdateSensors()
         {
@@ -189,7 +175,7 @@ internal sealed class Amd17Cpu : AmdCpu
             // PU [3:0]
             _cpu._pawnModule.ReadMsr(MSR_PWR_UNIT, out uint eax, out uint _);
             int esu = (int)((eax >> 8) & 0x1F);
-            double energyBaseUnit = Math.Pow(0.5,esu);
+            double energyBaseUnit = Math.Pow(0.5, esu);
 
 
             // MSRC001_029B
@@ -246,6 +232,12 @@ internal sealed class Amd17Cpu : AmdCpu
                         sviPlane1Offset = F17H_M01H_SVI + 0x10;
                         break;
                 }
+
+                // Zen 5 HEDT/server: family 0x1A models 0x00-0x2F (Turin / Shimada Peak).
+                // Threadripper 9970X is model 0x08. Desktop Granite Ridge is 0x40-0x4F (0x44 above).
+                bool isZen5Turin = cpuId.Family == 0x1A && cpuId.Model <= 0x2F;
+                if (isZen5Turin)
+                    supportsPerCcdTemperatures = true;
 
                 // SVI0_PLANE0_VDDCOR [24:16]
                 // SVI0_PLANE0_IDDCOR [7:0]
@@ -327,21 +319,37 @@ internal sealed class Amd17Cpu : AmdCpu
                     _cpu.ActivateSensor(_coreTemperatureTctlTdie);
                 }
 
-                // Tested only on R5 3600 & Threadripper 3960X, 5900X, 7900X
+                // Tested only on R5 3600 & Threadripper 3960X, 5900X, 7900X.
+                // Zen 5 Turin CCD map: linux/drivers/hwmon/k10temp.c (offset 0x1F0 from 0x59800).
                 if (supportsPerCcdTemperatures)
                 {
-                    for (uint i = 0; i < _ccdTemperatures.Length; i++)
+                    uint ccdBase;
+                    uint ccdCount;
+                    if (isZen5Turin)
                     {
-                        uint ccd1Offset = 0;
-                        if (cpuId.Model is 0x61 or 0x44) // Raphael or GraniteRidge
-                            ccd1Offset = F17H_M61H_CCD1_TEMP + i * 0x4;
-                        else
-                            ccd1Offset = F17H_M70H_CCD1_TEMP + i * 0x4;
-                        uint ccdRawTemp = _cpu._pawnModule.ReadSmn(ccd1Offset);
+                        ccdBase = F1AH_M00H_CCD1_TEMP;
+                        ccdCount = 16;
+                    }
+                    else if (cpuId.Model is 0x61 or 0x44) // Raphael or GraniteRidge
+                    {
+                        ccdBase = F17H_M61H_CCD1_TEMP;
+                        ccdCount = 8;
+                    }
+                    else
+                    {
+                        ccdBase = F17H_M70H_CCD1_TEMP;
+                        ccdCount = 8;
+                    }
 
+                    for (uint i = 0; i < ccdCount; i++)
+                    {
+                        uint ccdRawTemp = _cpu._pawnModule.ReadSmn(ccdBase + i * 0x4);
+                        bool ccdPresent = isZen5Turin
+                            ? (ccdRawTemp & F17H_CCD_TEMP_VALID) != 0
+                            : (ccdRawTemp & 0xFFF) > 0;
                         ccdRawTemp &= 0xFFF;
                         float ccdTemp = ((ccdRawTemp * 125) - 305000) * 0.001f;
-                        if (ccdRawTemp > 0 && ccdTemp < 125) // Zen 2 reports 95 degrees C max, but it might exceed that.
+                        if (ccdPresent && ccdTemp < 125) // Zen 2 reports 95 degrees C max, but it might exceed that.
                         {
                             if (_ccdTemperatures[i] == null)
                             {
@@ -422,19 +430,15 @@ internal sealed class Amd17Cpu : AmdCpu
                 _cpu.ActivateSensor(_busClock);
             }
 
-            if (_cpu._smu.IsPmTableLayoutDefined())
-            {
-                float[] smuData = _cpu._smu.GetPmTable();
-                _pmTable = smuData;
+            _pmTable = _cpu._smu.IsPmTableLayoutDefined() ? _cpu._smu.GetPmTable() : [];
 
-                foreach (KeyValuePair<KeyValuePair<uint, RyzenSMU.SmuSensorType>, Sensor> sensor in _smuSensors)
+            foreach (KeyValuePair<KeyValuePair<uint, RyzenSMU.SmuSensorType>, Sensor> sensor in _smuSensors)
+            {
+                if (_pmTable.Length > sensor.Key.Key)
                 {
-                    if (smuData.Length > sensor.Key.Key)
-                    {
-                        sensor.Value.Value = smuData[sensor.Key.Key] * sensor.Key.Value.Scale;
-                        if (sensor.Value.Value != 0)
-                            _cpu.ActivateSensor(sensor.Value);
-                    }
+                    sensor.Value.Value = _pmTable[sensor.Key.Key] * sensor.Key.Value.Scale;
+                    if (sensor.Value.Value != 0)
+                        _cpu.ActivateSensor(sensor.Value);
                 }
             }
         }
@@ -476,19 +480,20 @@ internal sealed class Amd17Cpu : AmdCpu
             }
         }
 
-        public struct PerCoreBaseIndices
+        public sealed class PerCoreBaseIndices
         {
-            public int Frequency;
-            public int Voltage;
-            public int Temperature;
-            public int Power;
+            public int Frequency { get; set; }
+            public int Voltage { get; set; }
+            public int Temperature { get; set; }
+            public int Power { get; set; }
         }
 
-        private static PerCoreBaseIndices GetPerCoreBaseIndices(uint pmTableVersion)
+        public static PerCoreBaseIndices GetPerCoreBaseIndices(uint pmTableVersion)
         {
             return pmTableVersion switch
             {
-                _ => new PerCoreBaseIndices { Frequency = 349, Voltage = 317, Temperature = 333, Power = 301 }
+                0x00621202 => new PerCoreBaseIndices { Frequency = 349, Voltage = 317, Temperature = 333, Power = 301 },
+                _ => null,
             };
         }
 
@@ -534,7 +539,7 @@ internal sealed class Amd17Cpu : AmdCpu
         {
             get
             {
-                if(Cores == null)
+                if (Cores == null)
                     return 0;
 
                 return Cores.Average(x => x.CoreClock);
@@ -601,10 +606,10 @@ internal sealed class Amd17Cpu : AmdCpu
         private Amd17Cpu _cpu;
         public CpuId Cpu { get { return _cpuId; } }
 
-        public TimeSpan SampleDuration { get; private set; }= TimeSpan.Zero;
+        public TimeSpan SampleDuration { get; private set; } = TimeSpan.Zero;
         public double EffectiveClock { get; private set; } = 0;
 
-        public ulong MperfDelta { get {  return _mperfDelta; } }
+        public ulong MperfDelta { get { return _mperfDelta; } }
         public ulong AperfDelta { get { return _aperfDelta; } }
 
         public CpuThread(Amd17Cpu cpu, CpuId cpuId)
@@ -660,7 +665,7 @@ internal sealed class Amd17Cpu : AmdCpu
             if (_aperfDelta > 20000e6)
                 _aperfDelta = 0;
 
-            if(_aperfDelta == 0 || _mperfDelta == 0)
+            if (_aperfDelta == 0 || _mperfDelta == 0)
             {
                 //overflow possible, numbers are > 20 GHz
                 _lastSampleTime = new(0);
@@ -712,7 +717,6 @@ internal sealed class Amd17Cpu : AmdCpu
             cpu.ActivateSensor(_multiplier);
             cpu.ActivateSensor(_power);
             cpu.ActivateSensor(_vcore);
-            cpu.ActivateSensor(_temperature);
         }
 
         public int CoreId { get; }
@@ -757,7 +761,7 @@ internal sealed class Amd17Cpu : AmdCpu
             uint msrPstate = eax;
             int curCpuVid = (int)((eax >> 14) & 0xff);
 
-            foreach(var t in Threads)
+            foreach (var t in Threads)
             {
                 t.ReadPerformanceCounter();
             }
@@ -867,41 +871,45 @@ internal sealed class Amd17Cpu : AmdCpu
                     _power.Value = (float)energy;
             }
 
-            // PM table per-core data for Zen 5 (Family 1Ah)
-            if (thread.Cpu.Family != 0x1A)
+            UpdatePmTableSensors();
+
+            if (_pmTableVoltage is > 0.1f and < 3.0f)
+            {
+                _vcore.Value = _pmTableVoltage;
+            }
+        }
+
+        private void UpdatePmTableSensors()
+        {
+            Processor.PerCoreBaseIndices indices = Processor.GetPerCoreBaseIndices(_cpu._smu.PmTableVersion);
+            if (indices is null)
             {
                 return;
             }
 
             float[] pmTable = _cpu._processor.PmTable;
-            Processor.PerCoreBaseIndices baseIndices = _cpu._processor.BaseIndices;
-
-            if (pmTable is { Length: > 0 })
+            if (pmTable.Length == 0)
             {
-                int pmTableCoreIdx = CoreId - 1;
-
-                if (baseIndices.Voltage > 0)
-                {
-                    int idx = baseIndices.Voltage + pmTableCoreIdx;
-                    if (idx < pmTable.Length)
-                    {
-                        _pmTableVoltage = pmTable[idx];
-                    }
-                }
-
-                if (baseIndices.Temperature > 0)
-                {
-                    int idx = baseIndices.Temperature + pmTableCoreIdx;
-                    if (idx < pmTable.Length)
-                    {
-                        _temperature.Value = pmTable[idx];
-                    }
-                }
+                return;
             }
 
-            if (_pmTableVoltage is > 0.1f and < 3.0f)
+            int coreIndex = CoreId - 1;
+
+            int voltageIndex = indices.Voltage + coreIndex;
+            if ((uint)voltageIndex < (uint)pmTable.Length)
             {
-                _vcore.Value = _pmTableVoltage;
+                _pmTableVoltage = pmTable[voltageIndex];
+            }
+
+            int temperatureIndex = indices.Temperature + coreIndex;
+            if ((uint)temperatureIndex < (uint)pmTable.Length)
+            {
+                float temperature = pmTable[temperatureIndex];
+                if (temperature is > 0 and < 125)
+                {
+                    _temperature.Value = temperature;
+                    _cpu.ActivateSensor(_temperature);
+                }
             }
         }
     }
@@ -912,6 +920,8 @@ internal sealed class Amd17Cpu : AmdCpu
     private const uint F17H_M01H_THM_TCON_CUR_TMP = 0x00059800;
     private const uint F17H_M70H_CCD1_TEMP = 0x00059954;
     private const uint F17H_M61H_CCD1_TEMP = 0x00059b08;
+    private const uint F1AH_M00H_CCD1_TEMP = 0x000599F0; // 0x59800 + 0x1F0 (k10temp Turin / Shimada Peak)
+    private const uint F17H_CCD_TEMP_VALID = 0x800;
     private const uint F17H_TEMP_RANGE_SEL_MASK = 0x80000;
     private const uint F17H_TEMP_TJ_SEL_MASK = 0x30000;
     private const uint FAMILY_17H_PCI_CONTROL_REGISTER = 0x60;

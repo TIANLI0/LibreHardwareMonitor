@@ -53,7 +53,23 @@ public abstract class EmbeddedController : Hardware
             ECSensor.TempCPUPackage,
             ECSensor.TempMB,
             ECSensor.TempVrm,
+            ECSensor.TempTSensor,
             ECSensor.FanCPUOpt),
+        new (Model.ROG_STRIX_X870E_H_GAMING_WIFI7,
+            BoardFamily.Amd800,
+            ECSensor.TempCPU,
+            ECSensor.TempCPUPackage,
+            ECSensor.TempMB,
+            ECSensor.TempVrm,
+            ECSensor.TempTSensor,
+            ECSensor.FanCPUOpt),
+        new (Model.ROG_STRIX_X870_F_GAMING_WIFI,
+            BoardFamily.Amd800,
+            ECSensor.TempCPU,
+            ECSensor.TempCPUPackage,
+            ECSensor.TempMB,
+            ECSensor.TempVrm,
+            ECSensor.TempTSensor),
         new(Model.PRIME_X470_PRO,
             BoardFamily.Amd400,
             ECSensor.TempChipset,
@@ -315,6 +331,10 @@ public abstract class EmbeddedController : Hardware
             ECSensor.TempTSensor,
             ECSensor.TempVrm,
             ECSensor.FanCPUOpt),
+        new(Model.ROG_STRIX_Z890_E_GAMING_WIFI,
+            BoardFamily.Intel800,
+            ECSensor.TempTSensor,
+            ECSensor.TempVrm),
         new(Model.ROG_MAXIMUS_Z790_FORMULA,
             BoardFamily.Intel700,
             ECSensor.TempWaterIn,
@@ -540,6 +560,14 @@ public abstract class EmbeddedController : Hardware
                 // ~2% across the pump range. Matches mainline Linux
                 // asus-ec-sensors (family_intel_700_series Water_Flow 0x00BC).
                 { ECSensor.FanWaterFlow, new EmbeddedControllerSource("Water Flow", SensorType.Flow, 0x00bc, 2, factor: 1.0f / 42f) }
+            }
+        },
+        {
+            // Addresses from FanInfo.data shipped with AsusFanControlService 2.05.06 (TEMP_Sensor: bank << 8 | register).
+            BoardFamily.Intel800, new Dictionary<ECSensor, EmbeddedControllerSource>
+            {
+                { ECSensor.TempVrm, new EmbeddedControllerSource("VRM", SensorType.Temperature, 0x0033) },
+                { ECSensor.TempTSensor, new EmbeddedControllerSource("T Sensor", SensorType.Temperature, 0x010c, blank: -40) }
             }
         }
     };
@@ -767,6 +795,7 @@ public abstract class EmbeddedController : Hardware
         Intel400,
         Intel600,
         Intel700,
+        Intel800,
         CrOS
     }
 
